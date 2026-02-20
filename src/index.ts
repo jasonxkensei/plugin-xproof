@@ -1,30 +1,34 @@
 import type { Plugin, Action, IAgentRuntime, Memory, State, HandlerCallback } from '@elizaos/core';
-
-// ─── Types ────────────────────────────────────────────────────────────────────
+import { createHash } from 'crypto';
 
 interface XProofConfig {
   apiKey: string;
   baseUrl: string;
 }
 
-interface CertifyResult {
-  id: string;
-  status: 'pending' | 'confirmed' | 'failed';
-  hash: string;
-  txHash?: string;
-  blockchainUrl?: string;
-  verifyUrl: string;
-  certifiedAt: string;
+interface XProofApiResponse {
+  proof_id: string;
+  status: string;
+  file_hash: string;
+  filename: string;
+  verify_url: string;
+  certificate_url: string;
+  proof_json_url: string;
+  blockchain: {
+    network: string;
+    transaction_hash: string;
+    explorer_url: string;
+  };
+  timestamp: string;
+  message?: string;
 }
 
-interface BatchCertifyResult {
-  results: CertifyResult[];
+interface XProofBatchResponse {
+  results: XProofApiResponse[];
   total: number;
   succeeded: number;
   failed: number;
 }
-
-// ─── Config helper ────────────────────────────────────────────────────────────
 
 function getConfig(runtime: IAgentRuntime): XProofConfig {
   const apiKey =
@@ -36,7 +40,9 @@ function getConfig(runtime: IAgentRuntime): XProofConfig {
   return { apiKey, baseUrl };
 }
 
-// ─── API helpers ──────────────────────────────────────────────────────────────
+function sha256(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
 
 async function callXProof(
   config: XProofConfig,
@@ -66,11 +72,11 @@ async function callXProof(
   return res.json();
 }
 
-async function verifyCert(
+async function getProof(
   config: XProofConfig,
-  certId: string
+  proofId: string
 ): Promise<unknown> {
-  const res = await fetch(`${config.baseUrl}/api/proof/${certId}`, {
+  const res = await fetch(`${config.baseUrl}/api/proof/${proofId}`, {
     headers: { Authorization: `Bearer ${config.apiKey}` },
   });
 
@@ -82,7 +88,22 @@ async function verifyCert(
   return res.json();
 }
 
-// ─── Action: CERTIFY_CONTENT ──────────────────────────────────────────────────
+function formatProofResponse(result: XProofApiResponse): string {
+  const lines = [
+    `Content certified on MultiversX blockchain.`,
+    ``,
+    `Certificate ID: ${result.proof_id}`,
+    `Status: ${result.status}`,
+    `Hash: ${result.file_hash}`,
+    `Filename: ${result.filename}`,
+    `Verify: ${result.verify_url}`,
+  ];
+  if (result.blockchain?.explorer_url) {
+    lines.push(`Explorer: ${result.blockchain.explorer_url}`);
+  }
+  lines.push(`Timestamp: ${result.timestamp}`);
+  return lines.join('\n');
+}
 
 const certifyContentAction: Action = {
   name: 'CERTIFY_CONTENT',
@@ -95,7 +116,7 @@ const certifyContentAction: Action = {
     'CERTIFY_REPORT',
   ],
   description:
-    'Certify text content, an agent output, a decision, or a report on the MultiversX blockchain via xProof. Returns a certificate ID and verification URL. Use when the agent needs to create a tamper-proof on-chain record of something.',
+    'Certify text content on the MultiversX blockchain via xProof. The content is hashed locally (SHA-256) and only the hash is sent to xProof — the content never leaves your agent. Returns a certificate ID and verification URL.',
   validate: async (runtime: IAgentRuntime) => {
     const { apiKey } = getConfig(runtime);
     return !!apiKey;
@@ -110,7 +131,11 @@ const certifyContentAction: Action = {
     const config = getConfig(runtime);
     const content =
       (options?.content as string) ?? message.content?.text ?? '';
-    const metadata = (options?.metadata as Record<string, unknown>) ?? {};
+    const filename =
+      (options?.filename as string) ?? 'agent-output.txt';
+    const authorName =
+      (options?.author_name as string) ?? 'ElizaOS Agent';
+    const webhookUrl = options?.webhook_url as string | undefined;
 
     if (!content) {
       callback?.({ text: 'No content provided to certify.', error: true });
@@ -118,25 +143,18 @@ const certifyContentAction: Action = {
     }
 
     try {
-      const result = (await callXProof(config, '/api/proof', {
-        content,
-        metadata,
-      })) as CertifyResult;
+      const fileHash = sha256(content);
 
-      const response = [
-        `✅ Content certified on MultiversX blockchain.`,
-        ``,
-        `**Certificate ID:** ${result.id}`,
-        `**Status:** ${result.status}`,
-        `**Hash:** ${result.hash}`,
-        `**Verify:** ${result.verifyUrl}`,
-        result.blockchainUrl ? `**Explorer:** ${result.blockchainUrl}` : '',
-        `**Certified at:** ${result.certifiedAt}`,
-      ]
-        .filter(Boolean)
-        .join('\n');
+      const body: Record<string, unknown> = {
+        file_hash: fileHash,
+        filename,
+        author_name: authorName,
+      };
+      if (webhookUrl) body.webhook_url = webhookUrl;
 
-      callback?.({ text: response, data: result });
+      const result = (await callXProof(config, '/api/proof', body)) as XProofApiResponse;
+
+      callback?.({ text: formatProofResponse(result), data: result });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -153,7 +171,7 @@ const certifyContentAction: Action = {
       {
         user: '{{agent}}',
         content: {
-          text: '✅ Content certified on MultiversX blockchain.\n\n**Certificate ID:** cert_abc123\n**Status:** pending\n**Verify:** https://xproof.app/verify/cert_abc123',
+          text: 'Content certified on MultiversX blockchain.\n\nCertificate ID: cert_abc123\nStatus: certified\nVerify: https://xproof.app/proof/cert_abc123',
           action: 'CERTIFY_CONTENT',
         },
       },
@@ -161,13 +179,11 @@ const certifyContentAction: Action = {
   ],
 };
 
-// ─── Action: CERTIFY_HASH ─────────────────────────────────────────────────────
-
 const certifyHashAction: Action = {
   name: 'CERTIFY_HASH',
   similes: ['ANCHOR_HASH', 'PROOF_HASH', 'CERTIFY_FILE_HASH'],
   description:
-    'Certify a SHA-256 hash on the MultiversX blockchain via xProof. Use when you already have a hash (e.g. of a file or document) and want to create an on-chain proof of existence.',
+    'Certify a SHA-256 file hash on the MultiversX blockchain via xProof. Use when you already have a hash and want to create an on-chain proof of existence.',
   validate: async (runtime: IAgentRuntime) => {
     const { apiKey } = getConfig(runtime);
     return !!apiKey;
@@ -180,34 +196,27 @@ const certifyHashAction: Action = {
     callback?: HandlerCallback
   ) => {
     const config = getConfig(runtime);
-    const hash = options?.hash as string;
-    const metadata = (options?.metadata as Record<string, unknown>) ?? {};
+    const fileHash = (options?.file_hash as string) ?? (options?.hash as string) ?? '';
+    const filename = (options?.filename as string) ?? 'certified-file';
+    const authorName = (options?.author_name as string) ?? 'ElizaOS Agent';
+    const webhookUrl = options?.webhook_url as string | undefined;
 
-    if (!hash) {
-      callback?.({ text: 'No hash provided. Expected a sha256:<hex> string.', error: true });
+    if (!fileHash || fileHash.length !== 64) {
+      callback?.({ text: 'Invalid hash. Expected a 64-character SHA-256 hex string.', error: true });
       return false;
     }
 
     try {
-      const result = (await callXProof(config, '/api/proof', {
-        hash,
-        metadata,
-      })) as CertifyResult;
+      const body: Record<string, unknown> = {
+        file_hash: fileHash,
+        filename,
+        author_name: authorName,
+      };
+      if (webhookUrl) body.webhook_url = webhookUrl;
 
-      const response = [
-        `✅ Hash certified on MultiversX blockchain.`,
-        ``,
-        `**Certificate ID:** ${result.id}`,
-        `**Status:** ${result.status}`,
-        `**Hash:** ${result.hash}`,
-        `**Verify:** ${result.verifyUrl}`,
-        result.blockchainUrl ? `**Explorer:** ${result.blockchainUrl}` : '',
-        `**Certified at:** ${result.certifiedAt}`,
-      ]
-        .filter(Boolean)
-        .join('\n');
+      const result = (await callXProof(config, '/api/proof', body)) as XProofApiResponse;
 
-      callback?.({ text: response, data: result });
+      callback?.({ text: formatProofResponse(result), data: result });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -219,12 +228,12 @@ const certifyHashAction: Action = {
     [
       {
         user: '{{user1}}',
-        content: { text: 'Certify hash sha256:abc123def456...' },
+        content: { text: 'Certify hash e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 filename report.pdf' },
       },
       {
         user: '{{agent}}',
         content: {
-          text: '✅ Hash certified on MultiversX blockchain.',
+          text: 'Content certified on MultiversX blockchain.\n\nCertificate ID: cert_abc123\nStatus: certified\nVerify: https://xproof.app/proof/cert_abc123',
           action: 'CERTIFY_HASH',
         },
       },
@@ -232,13 +241,11 @@ const certifyHashAction: Action = {
   ],
 };
 
-// ─── Action: CERTIFY_BATCH ────────────────────────────────────────────────────
-
 const certifyBatchAction: Action = {
   name: 'CERTIFY_BATCH',
   similes: ['BATCH_CERTIFY', 'ANCHOR_BATCH', 'PROOF_BATCH'],
   description:
-    'Certify multiple items (up to 50) in a single blockchain transaction via xProof. Use when an agent pipeline produces multiple outputs that all need proof of existence.',
+    'Certify multiple file hashes (up to 50) in a single API call via xProof. Each item needs a file_hash (64-char SHA-256 hex) and filename.',
   validate: async (runtime: IAgentRuntime) => {
     const { apiKey } = getConfig(runtime);
     return !!apiKey;
@@ -251,32 +258,36 @@ const certifyBatchAction: Action = {
     callback?: HandlerCallback
   ) => {
     const config = getConfig(runtime);
-    const proofs = options?.proofs as Array<{ content?: string; hash?: string; metadata?: Record<string, unknown> }>;
+    const files = options?.files as Array<{ file_hash: string; filename: string }>;
+    const authorName = (options?.author_name as string) ?? 'ElizaOS Agent';
 
-    if (!proofs || !Array.isArray(proofs) || proofs.length === 0) {
-      callback?.({ text: 'No proofs array provided for batch certification.', error: true });
+    if (!files || !Array.isArray(files) || files.length === 0) {
+      callback?.({ text: 'No files array provided for batch certification. Expected: [{ file_hash, filename }, ...]', error: true });
       return false;
     }
 
-    if (proofs.length > 50) {
+    if (files.length > 50) {
       callback?.({ text: 'Batch limit is 50 items. Please split into smaller batches.', error: true });
       return false;
     }
 
     try {
-      const result = (await callXProof(config, '/api/batch', { proofs })) as BatchCertifyResult;
+      const result = (await callXProof(config, '/api/batch', {
+        files,
+        author_name: authorName,
+      })) as XProofBatchResponse;
 
-      const response = [
-        `✅ Batch certified on MultiversX blockchain.`,
+      const lines = [
+        `Batch certified on MultiversX blockchain.`,
         ``,
-        `**Total:** ${result.total}`,
-        `**Succeeded:** ${result.succeeded}`,
-        `**Failed:** ${result.failed}`,
+        `Total: ${result.total}`,
+        `Succeeded: ${result.succeeded}`,
+        `Failed: ${result.failed}`,
         ``,
-        ...result.results.map((r, i) => `${i + 1}. ${r.id} — ${r.status} — ${r.verifyUrl}`),
-      ].join('\n');
+        ...result.results.map((r, i) => `${i + 1}. ${r.proof_id} - ${r.status} - ${r.verify_url}`),
+      ];
 
-      callback?.({ text: response, data: result });
+      callback?.({ text: lines.join('\n'), data: result });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -287,13 +298,11 @@ const certifyBatchAction: Action = {
   examples: [],
 };
 
-// ─── Action: VERIFY_PROOF ─────────────────────────────────────────────────────
-
 const verifyProofAction: Action = {
   name: 'VERIFY_PROOF',
   similes: ['CHECK_CERT', 'VERIFY_CERT', 'CHECK_PROOF', 'LOOKUP_CERT'],
   description:
-    'Verify the status of an xProof certificate by its ID. Returns on-chain status (pending/confirmed/failed) and blockchain details.',
+    'Verify the status of an xProof certificate by its proof ID. Returns on-chain status and blockchain details.',
   validate: async (runtime: IAgentRuntime) => {
     const { apiKey } = getConfig(runtime);
     return !!apiKey;
@@ -306,31 +315,32 @@ const verifyProofAction: Action = {
     callback?: HandlerCallback
   ) => {
     const config = getConfig(runtime);
-    const certId = options?.certId as string;
+    const proofId = (options?.proof_id as string) ?? (options?.certId as string) ?? '';
 
-    if (!certId) {
-      callback?.({ text: 'No certificate ID provided.', error: true });
+    if (!proofId) {
+      callback?.({ text: 'No proof ID provided.', error: true });
       return false;
     }
 
     try {
-      const result = (await verifyCert(config, certId)) as CertifyResult;
+      const result = (await getProof(config, proofId)) as XProofApiResponse;
 
-      const statusEmoji = result.status === 'confirmed' ? '✅' : result.status === 'pending' ? '⏳' : '❌';
+      const statusLabel = result.status === 'certified' ? 'Confirmed' : result.status === 'pending' ? 'Pending' : result.status;
 
-      const response = [
-        `${statusEmoji} Certificate **${result.id}**`,
+      const lines = [
+        `Certificate ${result.proof_id}`,
         ``,
-        `**Status:** ${result.status}`,
-        `**Hash:** ${result.hash}`,
-        `**Verify:** ${result.verifyUrl}`,
-        result.blockchainUrl ? `**Explorer:** ${result.blockchainUrl}` : '',
-        `**Certified at:** ${result.certifiedAt}`,
-      ]
-        .filter(Boolean)
-        .join('\n');
+        `Status: ${statusLabel}`,
+        `Hash: ${result.file_hash}`,
+        `Filename: ${result.filename}`,
+        `Verify: ${result.verify_url}`,
+      ];
+      if (result.blockchain?.explorer_url) {
+        lines.push(`Explorer: ${result.blockchain.explorer_url}`);
+      }
+      lines.push(`Timestamp: ${result.timestamp}`);
 
-      callback?.({ text: response, data: result });
+      callback?.({ text: lines.join('\n'), data: result });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -341,12 +351,10 @@ const verifyProofAction: Action = {
   examples: [],
 };
 
-// ─── Plugin export ────────────────────────────────────────────────────────────
-
 export const xproofPlugin: Plugin = {
   name: 'xproof',
   description:
-    'Certify agent outputs on the MultiversX blockchain via xProof. Supports text, hashes, batch certification, and proof verification. $0.05/cert, 6-second finality, MX-8004 validation loop.',
+    'Certify agent outputs on the MultiversX blockchain via xProof. Supports text content (hashed locally), file hashes, batch certification (up to 50), and proof verification. Starting at $0.05/cert — price decreases as network grows. Current pricing: https://xproof.app/api/pricing. 6-second finality.',
   actions: [
     certifyContentAction,
     certifyHashAction,

@@ -15,7 +15,7 @@
     "pluginParameters": {
       "XPROOF_API_KEY": {
         "type": "string",
-        "description": "API key for xproof.app — get one at https://xproof.app"
+        "description": "API key for xproof.app (pm_ prefix) — get one at https://xproof.app"
       },
       "XPROOF_BASE_URL": {
         "type": "string",

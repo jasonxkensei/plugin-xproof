@@ -1,4 +1,5 @@
-# xproof-eliza-plugin
+````
+# @elizaos/plugin-xproof
 
 **Don't let your agent go rogue. Certify before you execute.**
 
@@ -21,7 +22,7 @@ The compliance layer for autonomous agents on MultiversX. Audit guard blocks cri
 ### Community Release (Available Now)
 
 ```bash
-pnpm add xproof-eliza-plugin
+pnpm add @elizaos/plugin-xproof
 ```
 
 ### Official ElizaOS Registry (Coming Soon)
@@ -39,7 +40,7 @@ Add the plugin to your character configuration:
 ```json
 {
   "name": "TradingAgent",
-  "plugins": ["xproof-eliza-plugin"],
+  "plugins": ["@elizaos/plugin-xproof"],
   "settings": {
     "XPROOF_API_KEY": "pm_your_api_key_here"
   }
@@ -49,7 +50,7 @@ Add the plugin to your character configuration:
 Or register programmatically:
 
 ```typescript
-import { xproofPlugin } from "xproof-eliza-plugin";
+import { xproofPlugin } from "@elizaos/plugin-xproof";
 
 const agent = new AgentRuntime({
   plugins: [xproofPlugin],
@@ -132,7 +133,7 @@ Agent (internal):
      action_type: code_deploy
      decision: approved
      risk_level: critical
-     
+
   2. If API key is invalid or xProof is unreachable:
      -> AuditRequiredError: "EXECUTION BLOCKED: Audit certification failed."
      -> Agent stops. No deployment happens.
@@ -141,7 +142,7 @@ Agent (internal):
 ### Advanced: Using AuditRequiredError
 
 ```typescript
-import { AuditRequiredError } from "xproof-eliza-plugin";
+import { AuditRequiredError } from "@elizaos/plugin-xproof";
 
 try {
   // The audit action will throw if certification fails
@@ -191,10 +192,10 @@ Certify up to 50 file hashes in one call:
 
 ```typescript
 await runtime.processAction("CERTIFY_BATCH", message, state, {
-  files: [
-    { file_hash: "a1b2c3...64chars", filename: "model-weights.bin" },
-    { file_hash: "d4e5f6...64chars", filename: "training-data.csv" },
-    { file_hash: "g7h8i9...64chars", filename: "config.yaml" },
+  files: [\
+    { file_hash: "a1b2c3...64chars", filename: "model-weights.bin" },\
+    { file_hash: "d4e5f6...64chars", filename: "training-data.csv" },\
+    { file_hash: "g7h8i9...64chars", filename: "config.yaml" },\
   ],
   author_name: "ML Pipeline Agent",
 });
@@ -340,3 +341,4 @@ Prepaid credit packs available (USDC on Base): Starter (100/$5), Pro (1000/$40),
 ## License
 
 MIT
+````
